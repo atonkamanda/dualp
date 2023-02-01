@@ -47,6 +47,47 @@ class ConvEncoder(nn.Module):
         latent = obs_encoded.reshape(*batch_sizes, -1)
         return latent
 
+
+
+class ObsDecoder(nn.Module):
+    """Observation decoder network.
+
+    Takes the deterministic state and the stochastic belief and decodes it into a pixel observation.
+
+    Reference: https://arxiv.org/abs/1803.10122
+
+    Args:
+        depth (int, optional): Number of hidden units in the last layer.
+            Defaults to 32.
+    """
+
+    def __init__(self, depth=32):
+        super().__init__()
+        self.state_to_latent = nn.Sequential(
+            nn.LazyLinear(depth * 8 * 2 * 2),
+            nn.ReLU(),
+        )
+        self.decoder = nn.Sequential(
+            nn.LazyConvTranspose2d(depth * 4, 5, stride=2),
+            nn.ReLU(),
+            nn.ConvTranspose2d(depth * 4, depth * 2, 5, stride=2),
+            nn.ReLU(),
+            nn.ConvTranspose2d(depth * 2, depth, 6, stride=2),
+            nn.ReLU(),
+            nn.ConvTranspose2d(depth, 3, 6, stride=2),
+        )
+        self._depth = depth
+
+    def forward(self, state, rnn_hidden):
+        latent = self.state_to_latent(torch.cat([state, rnn_hidden], dim=-1))
+        *batch_sizes, D = latent.shape
+        latent = latent.view(-1, D, 1, 1)
+        obs_decoded = self.decoder(latent)
+        _, C, H, W = obs_decoded.shape
+        obs_decoded = obs_decoded.view(*batch_sizes, C, H, W)
+        return obs_decoded
+    
+    
 class DreamerActor(nn.Module):
     """Dreamer actor network.
 

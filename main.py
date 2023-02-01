@@ -4,7 +4,8 @@ import pathlib
 from dataclasses import dataclass
 from datetime import datetime
 import random 
-from utils import Logger
+from utils import Logger, set_seed
+from replay_buffer import ReplayBuffer
 # Torch 
 import torch
 import torch.nn as nn
@@ -20,8 +21,8 @@ import numpy as np
 import pandas as pd
 import cv2
 # Env 
-from torchrl.envs.libs.dm_control import DMControlEnv
-import gym
+import gymnasium as gym
+from gym.wrappers import record_video,record_episode_statistics
 @dataclass
 class Config:
     
@@ -34,13 +35,14 @@ class Config:
     # Logging
     logdir : str = pathlib.Path.cwd() / 'logs'
     record_video : bool = False
+    record_episode_statistics : bool = False 
     log_every : int = 1000
     print_every : int = 10
     
     
     
     # Task hyperparameters 
-    train_env : str = 'acrobot'
+    train_env : str = 'LunarLander-v2'
     task : str = 'run'
     epoch : int = 10 # The number of update 
     total_timesteps : int = 20000
@@ -59,13 +61,19 @@ class EnvManager():
         self.c = config
     
     def apply_wrappers(self,env):
+        if self.c.record_episode_statistics:
+            env = record_episode_statistics.RecordEpisodeStatistics(env)
         if self.c.record_video:
+            env = record_video.RecordVideo(env,video_folder='./videos',episode_trigger = lambda x: x % 10==0)
             print('Video recording enabled')
         return env
     
     def create_envs(self,env_name : str):
-        env = DMControlEnv(env_name, "swingup",from_pixels=True, pixels_only=True)
-        env.set_seed(self.c.seed)
+        env = gym.make(env_name, render_mode="rgb_array")
+        env = self.apply_wrappers(env)
+        # Print observation and action space
+        #print('Observation space : ',env.observation_space.shape)
+        #print('Action space : ',env.action_space.shape)
         return env
 
 class Agent(nn.Module):
@@ -74,14 +82,15 @@ class Agent(nn.Module):
         # Initialize the agent hyperparameters
         super().__init__() 
         self.c = config
-        #self.obs_size = obs_space.shape[0]
+        self.obs_size = obs_space.shape[0]
         #self.act_size = act_space.n
         #self.state_size = self.c.state_size
-        self.encoder = None
+        self.encoder = nn.Sequential(
+                        nn.Linear(self.obs_size,self.state_size),
+                        nn.ReLU())
         
         # Initialize the neural networks modules
-
-        """self.actor = nn.Sequential(
+        self.actor = nn.Sequential(
                         nn.Linear(self.state_size,self.act_size),
                         nn.Softmax(dim=-1))
         self.critic = nn.Sequential(
@@ -94,47 +103,94 @@ class Agent(nn.Module):
         # Initialize them with rmsprop
         self.policy_optimizer = optim.RMSprop(self.policy_params, lr=self.c.policy_lr)
         self.value_optimizer = optim.RMSprop(self.value_params, lr=self.c.value_lr)
-    """
 
 
-    def update(self) -> None:  
-        pass
+
+    def update(self,replay_buffer) -> None:  
+        data = replay_buffer.sample(self.c.batch_size)
+        latent = self.encoder(data['obs'])
+        value = self.critic(latent)
         
 class Trainer:
     def __init__(self, config:Config):
         self.c = config
-        self.seed = self.c.seed
+        set_seed(self.c.seed)
         self.env = EnvManager(self.c).create_envs(self.c.train_env)
-        #self.test_env = EnvManager(self.c).create_envs(self.c.test_env)
+        
         self.agent = Agent(self.c,self.env,self.env)
         self.logger = Logger()
+        self.replay_buffer = ReplayBuffer(10000)
         self.ep_reward_list = []
  
 
         if self.c.device == 'auto':
             self.c.device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
             
-    def set_seed(self,seed : int):
-        torch.manual_seed(seed)
-        np.random.seed(seed)
-        random.seed(seed)
-        if self.c.device == 'cuda':
-            torch.cuda.manual_seed_all(seed)
-    def collect_experience(self):
-        pass   
+    def calculate_advantage(rewards, values, gamma, lambda_value):
+        """
+        Calculate the advantage for a given set of rewards, values and hyperparameters
+
+        Parameters:
+        rewards (list): a list of rewards for each time step
+        values (list): a list of estimated state-values for each time step
+        gamma (float): discount factor
+        lambda_value (float): GAE lambda hyperparameter
+
+        Returns:
+        list: the advantage for each time step
+        """
+        T = len(rewards)
+        advantages = []
+        advantage = 0
+        for t in range(T - 1, -1, -1):
+            delta = rewards[t] + gamma * values[t + 1] - values[t]
+            advantage = delta + gamma * lambda_value * advantage
+            advantages.insert(0, advantage)
+        return advantages
+
+            
+    def collect_experience(self,n_steps : int = 1000):
+        train_data = [[] for _ in range(5)] # obs , action, reward, values , act_log_probs
+        obs, info  = self.env.reset()
+        ep_reward = 0 
+        for t in range(n_steps):
+            obs = torch.tensor(obs).float().to(self.c.device)
+            z = self.agent.encoder(obs)
+            policy = self.agent.actor(z) 
+            value = self.agent.critic(z)
+            dist = Categorical(policy)
+            act = dist.sample()
+            new_obs, rew, terminated, truncated, info = self.env.step(act)
+            ep_reward += rew
+            if terminated or truncated:
+                done = True
+            if done:
+                print(f"Episode reward : {ep_reward}")
+                break
+                observation, info = self.env.reset()
+
+        self.env.close()
+        return 
 
     def train(self):
-        tensordict = self.env.reset()
-        print("result of reset: ", tensordict)
-        plt.imshow(tensordict.get("pixels").numpy())
-        plt.show()
-        self.env.close()
-        #self.logger.write_video('test.mp4',tensordict["pixels"].numpy(),fps=60)
+        self.set_seed(self.seed)
+        self.collect_experience(1000)
+        for update in range(100):
+
         
         
     def eval(self):
         pass 
-  
+    
+    def compute_true_returns(self,rewards):
+        true_returns = []
+        true_return = 0
+        discount_factor = 1
+        for reward in rewards[::-1]:
+            true_return = reward + discount_factor * true_return
+            true_returns.append(true_return)
+            discount_factor = discount_factor * 0.99
+        return true_returns[::-1]
     
             
 @hydra.main(version_base=None, config_path="conf", config_name="config")

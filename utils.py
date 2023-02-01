@@ -1,5 +1,9 @@
 import pandas as pd
 import cv2 
+from torch.utils.data import IterableDataset, DataLoader
+import random
+import torch
+import numpy as np
 
 class Logger:
     def __init__(self):
@@ -30,3 +34,10 @@ class Logger:
         for frame in frames:
             out.write(frame)
         out.release()
+
+def set_seed(self,seed : int):
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+        random.seed(seed)
+        if self.c.device == 'cuda':
+            torch.cuda.manual_seed_all(seed)

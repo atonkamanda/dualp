@@ -191,6 +191,34 @@ class RSSMPosterior(nn.Module):
         return posterior_mean, posterior_std, state
 from torchrl.envs.libs.gym import GymEnv, GymWrapper
 from torchrl.modules import SafeModule
+
+
+def _dreamer_make_world_model(
+    obs_encoder, obs_decoder, rssm_prior, rssm_posterior, reward_module
+):
+    # World Model and reward model
+    rssm_rollout = RSSMRollout(
+        SafeModule(
+            rssm_prior,
+            in_keys=["state", "belief", "action"],
+            out_keys=[
+                ("next", "prior_mean"),
+                ("next", "prior_std"),
+                "_",
+                ("next", "belief"),
+            ],
+        ),
+        SafeModule(
+            rssm_posterior,
+            in_keys=[("next", "belief"), ("next", "encoded_latents")],
+            out_keys=[
+                ("next", "posterior_mean"),
+                ("next", "posterior_std"),
+                ("next", "state"),
+            ],
+        ),
+    )
+    return 
 # Test RSSM prior and posterior
 action_spec = torch.Tensor([1, 1])
 prior = RSSMPrior(action_spec, hidden_dim=200, rnn_hidden_dim=200, state_dim=30, scale_lb=0.1)
