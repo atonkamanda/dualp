@@ -20,3 +20,9 @@ def advantage(rewards, values, gamma):
     return advantages
 
 
+# Test advantage function
+rewards = [1, 2, 3, 4, 5]
+values = [0, 0, 0, 0, 0]
+gamma = 0.9
+advantages = advantage(rewards, values, gamma)
+print(advantages)

@@ -49,10 +49,8 @@ class Config:
     
     # Model hyperparameters
     batch_size : int = 64
-    can_sleep : bool = True
-    sleep_itr : int = 10000
-    wake_lr : float = 0.02
-    sleep_lr : float = 0.001    
+    policy_lr : float = 1e-3
+    value_lr : float = 1e-3
     
 class EnvManager():
     """ Take an env and apply wrapper to it"""
@@ -72,8 +70,8 @@ class EnvManager():
         env = gym.make(env_name, render_mode="rgb_array")
         env = self.apply_wrappers(env)
         # Print observation and action space
-        #print('Observation space : ',env.observation_space.shape)
-        #print('Action space : ',env.action_space.shape)
+        print('Observation space : ',env.observation_space.shape)
+        print('Action space : ',env.action_space.shape)
         return env
 
 class Agent(nn.Module):
@@ -82,9 +80,9 @@ class Agent(nn.Module):
         # Initialize the agent hyperparameters
         super().__init__() 
         self.c = config
-        self.obs_size = obs_space.shape[0]
-        #self.act_size = act_space.n
-        #self.state_size = self.c.state_size
+        self.obs_size = 8
+        self.act_size = 4
+        self.state_size = 10
         self.encoder = nn.Sequential(
                         nn.Linear(self.obs_size,self.state_size),
                         nn.ReLU())
@@ -114,12 +112,12 @@ class Agent(nn.Module):
 class Trainer:
     def __init__(self, config:Config):
         self.c = config
-        set_seed(self.c.seed)
+        set_seed(self.c.seed,self.c.device)
         self.env = EnvManager(self.c).create_envs(self.c.train_env)
         
         self.agent = Agent(self.c,self.env,self.env)
         self.logger = Logger()
-        self.replay_buffer = ReplayBuffer(10000)
+        #self.replay_buffer = ReplayBuffer(10000)
         self.ep_reward_list = []
  
 
@@ -160,22 +158,25 @@ class Trainer:
             value = self.agent.critic(z)
             dist = Categorical(policy)
             act = dist.sample()
-            new_obs, rew, terminated, truncated, info = self.env.step(act)
+            next_obs, rew, terminated, truncated, info = self.env.step(act.item())
             ep_reward += rew
+          
             if terminated or truncated:
-                done = True
-            if done:
                 print(f"Episode reward : {ep_reward}")
+                # print episode lenght
+                print(f"Episode length : {t}")
+                for i, data in enumerate([obs,act,rew,value,dist.log_prob(act)]): 
+                    train_data[i].append(data)
                 break
                 observation, info = self.env.reset()
-
+            obs = next_obs
         self.env.close()
-        return 
+        return train_data
 
     def train(self):
-        self.set_seed(self.seed)
-        self.collect_experience(1000)
-        for update in range(100):
+        test = self.collect_experience(1000)
+        print(test)
+        #for update in range(100):
 
         
         

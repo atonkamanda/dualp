@@ -1,0 +1,12 @@
+seed: 0
+device: cpu
+load_agent: false
+logdir: ./logs
+record_video: false
+record_episode_statistics: true
+log_every: 1000
+training_env: CartPole-v1
+testing_env: CartPole-v1
+training_frame: 10000
+testing_frame: 1000
+binding_size: 20

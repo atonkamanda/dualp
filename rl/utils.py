@@ -35,9 +35,9 @@ class Logger:
             out.write(frame)
         out.release()
 
-def set_seed(self,seed : int):
+def set_seed(seed : int,device):
         torch.manual_seed(seed)
         np.random.seed(seed)
         random.seed(seed)
-        if self.c.device == 'cuda':
+        if device == 'cuda':
             torch.cuda.manual_seed_all(seed)
