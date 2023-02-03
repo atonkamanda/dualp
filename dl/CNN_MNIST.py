@@ -1,0 +1,236 @@
+import os 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+from torchvision import datasets, transforms
+import pathlib
+import matplotlib.pyplot as plt
+from dataclasses import dataclass
+from omegaconf import OmegaConf,DictConfig
+import hydra
+import pickle
+import numpy as np
+import pandas as pd
+from utils import Logger
+@dataclass
+class Config:
+    
+    # Reproductibility and hardware 
+    seed : int = 0
+    device : str = 'cuda' if torch.cuda.is_available() else 'cpu'
+    load_model : bool = False
+    job_num : int = 0
+
+    # Logging
+    logdir : str = pathlib.Path.cwd() / 'logs'
+    log_every : int = 1000
+    print_every : int = 10
+    
+    
+    
+    # Task hyperparameters 
+    dataset : str = 'MNIST'
+    epoch : int = 10 # The number of update 
+    
+    
+    # Control hyperparameters
+    batch_size : int = 64 
+    
+    # Habitual network hyperparameters
+    temperature : float = 4.0
+    lr : float = 0.001
+    
+class ShapeRecorderHook:
+    def __init__(self):
+        self.outputs = []
+
+    def hook(self, module, input, output):
+        self.outputs.append((module, output.shape))
+
+    def attach(self, module):
+        handles = []
+        for m in module.children():
+            handles.extend(self.attach(m))
+        if not hasattr(module, "children") or len(list(module.children())) == 0:
+            handle = module.register_forward_hook(self.hook)
+            handles.append(handle)
+        return handles
+
+    def remove(self):
+        for handle in self.handles:
+            handle.remove()
+
+def record_shapes(model):
+    hook = ShapeRecorderHook()
+    hook.handles = hook.attach(model)
+    return hook   
+    
+class DataManager():
+    def __init__(self,config):
+        self.c = config
+        self.dataset = config.dataset
+        self.batch_size = config.batch_size
+        
+    def load_MNIST(self):
+        # Loading MNIST
+        train_dataset = datasets.MNIST(root='./data/',
+                                    train=True,
+                                    transform=transforms.ToTensor(),
+                                    download=True,
+                                    )
+
+        test_dataset = datasets.MNIST(root='./data/',
+                                    train=False,
+                                    transform=transforms.ToTensor())
+
+
+        train_loader = torch.utils.data.DataLoader(dataset=train_dataset,
+                                                batch_size=self.c.batch_size,
+                                                shuffle=True,
+                                                pin_memory=True)
+
+        test_loader = torch.utils.data.DataLoader(dataset=test_dataset,
+                                                batch_size=self.c.batch_size,
+                                                shuffle=False,
+                                                pin_memory=True)
+        return train_loader,test_loader
+
+# Initialize MLP
+
+class CNN_MNIST_Dual(nn.Module):
+
+    def __init__(self,config):
+        super(CNN_MNIST_Dual, self).__init__()
+        # CNN for MNIST dataset
+        self.c = config
+        
+        self.encoder = nn.Sequential(
+                        nn.Conv2d(1, 10, kernel_size=5),
+                        nn.ReLU(),
+                        nn.MaxPool2d(2),
+                        nn.Conv2d(10, 20, kernel_size=5),
+                        nn.ReLU(),
+                        nn.MaxPool2d(2))
+        self.control = nn.Sequential(
+                        nn.Linear(320, 50),
+                        nn.ReLU(),
+                        nn.Linear(50, 10),
+                        nn.Softmax(dim=1))
+        
+        self.habitual = nn.Sequential(
+                        nn.Linear(320, 50),
+                        nn.ReLU(),
+                        nn.Linear(50, 10),
+                        nn.Softmax(dim=1))
+      
+        
+    def forward(self, x):
+        z  = self.encoder(x)
+        z = z.contiguous().view(-1, 320)
+        softmax_c = self.control(z)
+        softmax_h = self.habitual(z)
+        # Normalize the output by temperature and log softmax for numerical stability
+        #y_c = y_c / self.temperature
+       # y_h = y_h / self.temperature
+        # Return the log softmax
+        return softmax_c,softmax_h
+        
+
+
+
+
+class Trainer:
+    def __init__(self, config:Config):
+        self.c = config
+        self.seed = self.c.seed
+        self.device = self.c.device
+        self.logger = Logger()
+        self.train_data, self.test_data = DataManager(self.c).load_MNIST()
+        self.model = CNN_MNIST_Dual(self.c).to(self.device)
+        self.criterion = nn.CrossEntropyLoss()
+        self.optimizer = optim.Adam(self.model.parameters(), lr=0.001)
+        
+        self.T = self.c.temperature
+    def train(self, epoch):
+        self.model.train()
+        save_loss = []
+        save_accuracy = []
+        for e in range(epoch):
+            for batch_idx, (data, target) in enumerate(self.train_data):
+                    self.optimizer.zero_grad()
+                    data = data.to(self.device)
+                    target = target.to(self.device)
+                    softmax_c,softmax_h = self.model(data)
+            
+                    # Log softmax
+                    soft_target = F.log_softmax(softmax_c/self.T, dim=1)
+                    soft_student = F.log_softmax(softmax_h/self.T, dim=1)
+                    
+             
+                    # Compute losses 
+                    loss_control_hard = self.criterion(softmax_c, target)
+                    loss_habitual_hard = self.criterion(softmax_h, target)/self.T**2
+
+                    # Compute KL divergence
+                    loss_kl = F.kl_div(soft_student, soft_target, reduction='batchmean')
+                    # Sum up all losses
+                    loss = loss_control_hard + loss_habitual_hard + loss_kl
+                    loss.backward()
+                    self.optimizer.step()
+        
+                    save_loss.append(loss.item())
+                
+                        
+                    if batch_idx % 100 == 0:
+                        print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(e+1, batch_idx * len(data), len(self.train_data.dataset),100. * batch_idx / len(self.train_data), loss.item()))
+                
+            print('Epoch:', e+1)
+            accuracy  = self.eval().item()
+            save_accuracy.append(accuracy)
+        # Plot loss and accuracy
+        """self.logger.add_log('Wake loss', save_loss)
+        self.logger.add_log('Wake accuracy', save_accuracy)
+        self.logger.write_to_csv('log.csv')"""
+    def eval(self):
+        self.model.eval()
+        test_loss = 0
+        correct = 0
+        for data, target in self.test_data:
+            data = data.to(self.device)
+            target = target.to(self.device)
+            output = self.model(data)
+        
+            # sum up batch loss
+            test_loss += torch.mean(self.criterion(output, target)).item()
+            # Compute accuracy 
+            pred = output.data.max(1, keepdim=True)[1]
+            correct += pred.eq(target.data.view_as(pred)).cpu().sum()
+        
+        test_loss /= len(self.test_data.dataset)
+        print('\nTest set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(test_loss, correct, len(self.test_data.dataset),100. * correct / len(self.test_data.dataset)))
+        # Return accuracy 
+        return correct / len(self.test_data.dataset)
+
+            
+#@hydra.main(version_base=None, config_path="conf", config_name="config")
+def main() -> None: # cfg : DictConfig
+    # Load default config
+    default_config = OmegaConf.structured(Config)
+    # Merge default config with run config, run config overrides if there is a conflict
+    #config = OmegaConf.merge(default_config, cfg)
+    #OmegaConf.save(config, 'config.yaml') 
+    config = default_config
+    
+    #hydra_cfg = hydra.core.hydra_config.HydraConfig.get()
+    """job_num = hydra_cfg.job.num
+    print(f'Hydra job number: {job_num}')
+    config.job_num = job_num"""
+    
+    trainer = Trainer(config)
+    trainer.train(config.epoch)
+    
+    
+if __name__ == '__main__':
+    main()
+    print('Finished correctly')
