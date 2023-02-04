@@ -13,6 +13,8 @@ import pickle
 import numpy as np
 import pandas as pd
 from utils import Logger
+from termcolor import colored
+
 @dataclass
 class Config:
     
@@ -40,31 +42,6 @@ class Config:
     # Habitual network hyperparameters
     temperature : float = 4.0
     lr : float = 0.001
-    
-class ShapeRecorderHook:
-    def __init__(self):
-        self.outputs = []
-
-    def hook(self, module, input, output):
-        self.outputs.append((module, output.shape))
-
-    def attach(self, module):
-        handles = []
-        for m in module.children():
-            handles.extend(self.attach(m))
-        if not hasattr(module, "children") or len(list(module.children())) == 0:
-            handle = module.register_forward_hook(self.hook)
-            handles.append(handle)
-        return handles
-
-    def remove(self):
-        for handle in self.handles:
-            handle.remove()
-
-def record_shapes(model):
-    hook = ShapeRecorderHook()
-    hook.handles = hook.attach(model)
-    return hook   
     
 class DataManager():
     def __init__(self,config):
@@ -155,6 +132,9 @@ class Trainer:
     def train(self, epoch):
         self.model.train()
         save_loss = []
+        save_loss_kl = []
+        save_loss_control_hard = []
+        save_loss_habitual_hard = []
         save_accuracy = []
         for e in range(epoch):
             for batch_idx, (data, target) in enumerate(self.train_data):
@@ -167,31 +147,52 @@ class Trainer:
                     soft_target = F.log_softmax(softmax_c/self.T, dim=1)
                     soft_student = F.log_softmax(softmax_h/self.T, dim=1)
                     
-             
+                    
                     # Compute losses 
                     loss_control_hard = self.criterion(softmax_c, target)
                     loss_habitual_hard = self.criterion(softmax_h, target)/self.T**2
-
+    
                     # Compute KL divergence
-                    loss_kl = F.kl_div(soft_student, soft_target, reduction='batchmean')
+                    loss_kl = F.kl_div(soft_student, soft_target, reduction='batchmean',log_target=True)
                     # Sum up all losses
                     loss = loss_control_hard + loss_habitual_hard + loss_kl
                     loss.backward()
-                    self.optimizer.step()
-        
-                    save_loss.append(loss.item())
+                    self.optimizer.step() 
+                    
+                    # Save losses and accuracy       
+                    save_loss.append(loss.item()) 
+                    save_loss_kl.append(loss_kl.item())
+                    save_loss_control_hard.append(loss_control_hard.item())
+                    save_loss_habitual_hard.append(loss_habitual_hard.item())
+                    
                 
                         
                     if batch_idx % 100 == 0:
-                        print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(e+1, batch_idx * len(data), len(self.train_data.dataset),100. * batch_idx / len(self.train_data), loss.item()))
-                
-            print('Epoch:', e+1)
+                        #print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(e+1, batch_idx * len(data), len(self.train_data.dataset),100. * batch_idx / len(self.train_data), loss.item()))
+                        epoch = 'E: {:.0f} '.format(e+1, epoch)
+                        loss_line = 'Loss: {:.6f} '.format(save_loss[-1])
+                        kl_line = 'KL: {:.6f} '.format(save_loss_kl[-1])
+                        control_line = 'C: {:.6f} '.format(save_loss_control_hard[-1])
+                        habitual_line = 'H: {:.6f} '.format(save_loss_habitual_hard[-1])
+                        percent = '(Completion: {:.0f}%) '.format(100. * batch_idx / len(self.train_data))
+
+                        print(colored(epoch, 'cyan'), end='')
+                        print(colored(loss_line, 'red'), end=' ')
+                        print(colored(kl_line, 'yellow'), end=' ')
+                        print(colored(control_line, 'green'), end=' ')
+                        print(colored(habitual_line, 'light_green'), end='')
+                        print(colored(percent, 'magenta'), end='\n')
+              
+            print('Accuracy at epoch', e+1)
             accuracy  = self.eval().item()
             save_accuracy.append(accuracy)
         # Plot loss and accuracy
-        """self.logger.add_log('Wake loss', save_loss)
-        self.logger.add_log('Wake accuracy', save_accuracy)
-        self.logger.write_to_csv('log.csv')"""
+        self.logger.add_log('Train loss', save_loss)
+        self.logger.add_log('Train loss KL', save_loss_kl)
+        self.logger.add_log('Train loss control hard', save_loss_control_hard)
+        self.logger.add_log('Train loss habitual hard', save_loss_habitual_hard)
+        self.logger.add_log('Accuracy', save_accuracy)
+        self.logger.write_to_csv('log.csv')
     def eval(self):
         self.model.eval()
         test_loss = 0
@@ -199,12 +200,12 @@ class Trainer:
         for data, target in self.test_data:
             data = data.to(self.device)
             target = target.to(self.device)
-            output = self.model(data)
+            control_hard,habitual_hard = self.model(data)
         
             # sum up batch loss
-            test_loss += torch.mean(self.criterion(output, target)).item()
+            test_loss += torch.mean(self.criterion(control_hard, target)).item()
             # Compute accuracy 
-            pred = output.data.max(1, keepdim=True)[1]
+            pred = control_hard.data.max(1, keepdim=True)[1]
             correct += pred.eq(target.data.view_as(pred)).cpu().sum()
         
         test_loss /= len(self.test_data.dataset)
