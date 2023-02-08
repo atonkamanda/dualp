@@ -12,7 +12,7 @@ import hydra
 import pickle
 import numpy as np
 import pandas as pd
-from utils import Logger
+from utils import Logger,compare_beliefs, VariationalDropout
 from termcolor import colored
 
 @dataclass
@@ -42,6 +42,9 @@ class Config:
     # Habitual network hyperparameters
     temperature : float = 4.0
     lr : float = 0.001
+    # Compression 
+    variational_dropout : bool = False
+    quantization : bool = False
     
 class DataManager():
     def __init__(self,config):
@@ -92,26 +95,24 @@ class CNN_MNIST_Dual(nn.Module):
         self.control = nn.Sequential(
                         nn.Linear(320, 50),
                         nn.ReLU(),
-                        nn.Linear(50, 10),
-                        nn.Softmax(dim=1))
+                        nn.Linear(50, 10))
         
         self.habitual = nn.Sequential(
                         nn.Linear(320, 50),
+                        nn.Dropout(0.5),
                         nn.ReLU(),
-                        nn.Linear(50, 10),
-                        nn.Softmax(dim=1))
-      
+                        nn.Dropout(0.5),
+                        nn.Linear(50, 10))
+
+        self.T = self.c.temperature
         
     def forward(self, x):
         z  = self.encoder(x)
         z = z.contiguous().view(-1, 320)
-        softmax_c = self.control(z)
-        softmax_h = self.habitual(z)
-        # Normalize the output by temperature and log softmax for numerical stability
-        #y_c = y_c / self.temperature
-       # y_h = y_h / self.temperature
-        # Return the log softmax
-        return softmax_c,softmax_h
+        logit_c = self.control(z)
+        logit_h = self.habitual(z)
+        
+        return logit_c,logit_h
         
 
 
@@ -141,19 +142,22 @@ class Trainer:
                     self.optimizer.zero_grad()
                     data = data.to(self.device)
                     target = target.to(self.device)
-                    softmax_c,softmax_h = self.model(data)
-            
-                    # Log softmax
-                    soft_target = F.log_softmax(softmax_c/self.T, dim=1)
-                    soft_student = F.log_softmax(softmax_h/self.T, dim=1)
+                    logit_c,logit_h = self.model(data)
+                    # Softmax for "real" task
+                    softmax_h = F.softmax(logit_h, dim=1)
+                    softmax_c = F.softmax(logit_c, dim=1)
+                    # Logsoftmax for distillation
+                    soft_student = F.log_softmax(logit_h/self.T, dim=1)
+                    soft_target =  F.softmax(logit_c/self.T, dim=1)
                     
+    
                     
                     # Compute losses 
                     loss_control_hard = self.criterion(softmax_c, target)
                     loss_habitual_hard = self.criterion(softmax_h, target)/self.T**2
-    
+                    
                     # Compute KL divergence
-                    loss_kl = F.kl_div(soft_student, soft_target, reduction='batchmean',log_target=True)
+                    loss_kl = F.kl_div(input=soft_student, target=soft_target, reduction='batchmean',log_target=False)
                     # Sum up all losses
                     loss = loss_control_hard + loss_habitual_hard + loss_kl
                     loss.backward()
@@ -182,6 +186,9 @@ class Trainer:
                         print(colored(control_line, 'green'), end=' ')
                         print(colored(habitual_line, 'light_green'), end='')
                         print(colored(percent, 'magenta'), end='\n')
+                        
+                        
+                        compare_beliefs(softmax_c,softmax_h,kl=loss_kl.item(),name1='control',name2='habitual',reduction=True)
               
             print('Accuracy at epoch', e+1)
             accuracy  = self.eval().item()

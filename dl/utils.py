@@ -3,7 +3,58 @@ import cv2
 from torch.utils.data import IterableDataset, DataLoader
 import random
 import torch
+import torch.nn as nn
 import numpy as np
+# Import matplotlib
+import matplotlib.pyplot as plt
+
+
+
+class VariationalDropout(nn.Module):
+    def __init__(self, alpha=1.0, dim=None):
+        super(VariationalDropout, self).__init__()
+        
+        self.dim = dim
+        self.max_alpha = alpha
+        log_alpha = (torch.ones(dim) * alpha).log()
+        self.log_alpha = nn.Parameter(log_alpha)
+        
+    def kl(self):
+        c1 = 1.16145124
+        c2 = -1.50204118
+        c3 = 0.58629921
+        
+        alpha = self.log_alpha.exp()
+        
+        negative_kl = 0.5 * self.log_alpha + c1 * alpha + c2 * alpha**2 + c3 * alpha**3
+        
+        kl = -negative_kl
+        
+        return kl.mean()
+    
+    def forward(self, x):
+        """
+        Sample noise   e ~ N(1, alpha)
+        Multiply noise h = h_ * e
+        """
+        if self.train():
+            # N(0,1)
+            epsilon = torch.randn(x.size())
+            if x.is_cuda:
+                epsilon = epsilon.cuda()
+
+            # Clip alpha
+            self.log_alpha.data = torch.clamp(self.log_alpha.data, max=self.max_alpha)
+            alpha = self.log_alpha.exp()
+
+            # N(1, alpha)
+            epsilon = epsilon * alpha
+
+            return x * epsilon
+        else:
+            return x
+
+
 
 class Logger:
     def __init__(self):
@@ -34,6 +85,39 @@ class Logger:
         for frame in frames:
             out.write(frame)
         out.release()
+
+
+def compare_beliefs(softmax1, softmax2, kl, name1='Softmax1', name2="Softmax2",reduction=False):
+    if reduction == True:
+        softmax1 = torch.mean(softmax1, dim=0).detach().numpy()
+        softmax2 = torch.mean(softmax2, dim=0).detach().numpy()
+
+    categories = range(len(softmax1))
+    colors = ['red', 'blue', 'green', 'purple', 'yellow', 'pink', 'brown', 'orange', 'gray', 'black']
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 5), gridspec_kw={'width_ratios': [2, 2], 'wspace': 0.3})
+    for i, softmax in enumerate([softmax1, softmax2]):
+        ax = [ax1, ax2][i]
+        for j, b in enumerate(softmax):
+            ax.bar(j, b, color=colors[j], width=0.8, edgecolor='black')
+        ax.set_xlim(-1, len(softmax))
+        ax.set_xticks(categories)
+        ax.set_xlabel('Categories', fontsize=12)
+        if i == 0:
+            ax.set_ylabel('Probability', fontsize=12)
+        ax.set_title([name1, name2][i], fontsize=14, fontweight='bold')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.spines['bottom'].set_linewidth(0.5)
+        ax.spines['left'].set_linewidth(0.5)
+        ax.yaxis.grid(True, linestyle='--', linewidth=0.5, color='gray', alpha=0.7)
+        for tick in ax.xaxis.get_major_ticks():
+            tick.label.set_fontsize(10)
+        for tick in ax.yaxis.get_major_ticks():
+            tick.label.set_fontsize(10)
+    fig.text(0.5, 0.9, 'KL: {:.2f}'.format(kl), ha='center', fontsize=12, fontweight='bold')
+    #plt.tight_layout()
+    plt.show()
+
 
 def set_seed(seed : int,device):
         torch.manual_seed(seed)
