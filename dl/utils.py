@@ -95,11 +95,13 @@ def compare_beliefs(softmax1, softmax2, kl, name1='Softmax1', name2="Softmax2",r
     categories = range(len(softmax1))
     colors = ['red', 'blue', 'green', 'purple', 'yellow', 'pink', 'brown', 'orange', 'gray', 'black']
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 5), gridspec_kw={'width_ratios': [2, 2], 'wspace': 0.3})
+    y_max = max(max(softmax1), max(softmax2))
     for i, softmax in enumerate([softmax1, softmax2]):
         ax = [ax1, ax2][i]
         for j, b in enumerate(softmax):
             ax.bar(j, b, color=colors[j], width=0.8, edgecolor='black')
         ax.set_xlim(-1, len(softmax))
+        ax.set_ylim(0, y_max)
         ax.set_xticks(categories)
         ax.set_xlabel('Categories', fontsize=12)
         if i == 0:

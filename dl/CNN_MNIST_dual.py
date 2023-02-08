@@ -24,16 +24,17 @@ class Config:
     load_model : bool = False
     job_num : int = 0
 
-    # Logging
+    # Logging and saving 
     logdir : str = pathlib.Path.cwd() / 'logs'
-    log_every : int = 1000
-    print_every : int = 10
+    savedir : str = pathlib.Path.cwd() / 'saved_models'
+    save_model : bool = True
+
     
     
     
     # Task hyperparameters 
     dataset : str = 'MNIST'
-    epoch : int = 10 # The number of update 
+    epoch : int = 1 # The number of update 
     
     
     # Control hyperparameters
@@ -42,6 +43,9 @@ class Config:
     # Habitual network hyperparameters
     temperature : float = 4.0
     lr : float = 0.001
+    
+    # Loses coefficients
+    kl_coeff : float = 5
     # Compression 
     variational_dropout : bool = False
     quantization : bool = False
@@ -98,14 +102,11 @@ class CNN_MNIST_Dual(nn.Module):
                         nn.Linear(50, 10))
         
         self.habitual = nn.Sequential(
-                        nn.Linear(320, 50),
-                        nn.Dropout(0.5),
-                        nn.ReLU(),
-                        nn.Dropout(0.5),
-                        nn.Linear(50, 10))
+                        nn.Linear(320, 10))
+                        
 
         self.T = self.c.temperature
-        
+     
     def forward(self, x):
         z  = self.encoder(x)
         z = z.contiguous().view(-1, 320)
@@ -113,8 +114,19 @@ class CNN_MNIST_Dual(nn.Module):
         logit_h = self.habitual(z)
         
         return logit_c,logit_h
+    
+    def encode(self, x):
+        z  = self.encoder(x)
+        z = z.contiguous().view(-1, 320)
+        return z
         
-
+    def forward_c(self, z):
+        logit_c = self.control(z)
+        return logit_c
+        
+    def forward_h(self, z):
+        logit_h = self.habitual(z)
+        return logit_h
 
 
 
@@ -129,7 +141,9 @@ class Trainer:
         self.criterion = nn.CrossEntropyLoss()
         self.optimizer = optim.Adam(self.model.parameters(), lr=0.001)
         
+        # Hyperparameters
         self.T = self.c.temperature
+        self.kl_coeff = self.c.kl_coeff
     def train(self, epoch):
         self.model.train()
         save_loss = []
@@ -157,7 +171,7 @@ class Trainer:
                     loss_habitual_hard = self.criterion(softmax_h, target)/self.T**2
                     
                     # Compute KL divergence
-                    loss_kl = F.kl_div(input=soft_student, target=soft_target, reduction='batchmean',log_target=False)
+                    loss_kl = F.kl_div(input=soft_student, target=soft_target, reduction='batchmean',log_target=False) #* self.kl_coeff
                     # Sum up all losses
                     loss = loss_control_hard + loss_habitual_hard + loss_kl
                     loss.backward()
@@ -188,7 +202,7 @@ class Trainer:
                         print(colored(percent, 'magenta'), end='\n')
                         
                         
-                        compare_beliefs(softmax_c,softmax_h,kl=loss_kl.item(),name1='control',name2='habitual',reduction=True)
+                        #compare_beliefs(softmax_c,softmax_h,kl=loss_kl.item(),name1='Control',name2='Habitual',reduction=True)
               
             print('Accuracy at epoch', e+1)
             accuracy  = self.eval().item()
@@ -200,6 +214,9 @@ class Trainer:
         self.logger.add_log('Train loss habitual hard', save_loss_habitual_hard)
         self.logger.add_log('Accuracy', save_accuracy)
         self.logger.write_to_csv('log.csv')
+        # Save model
+        if self.c.save_model:
+            torch.save(self.model.state_dict(), "./saved_models/mnist_cnn.pt")
     def eval(self):
         self.model.eval()
         test_loss = 0
