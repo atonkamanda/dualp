@@ -27,14 +27,14 @@ class Config:
     # Logging and saving 
     logdir : str = pathlib.Path.cwd() / 'logs'
     savedir : str = pathlib.Path.cwd() / 'saved_models'
-    save_model : bool = True
+    save_model : bool = False
 
     
     
     
     # Task hyperparameters 
     dataset : str = 'MNIST'
-    epoch : int = 1 # The number of update 
+    epoch : int = 10 # The number of update 
     
     
     # Control hyperparameters
@@ -103,6 +103,12 @@ class CNN_MNIST_Dual(nn.Module):
         
         self.habitual = nn.Sequential(
                         nn.Linear(320, 10))
+        
+        
+        self.entropy_predictor = nn.Sequential(
+                                 nn.Linear(320, 50),
+                                 nn.ReLU(),
+                                 nn.Linear(50, 1))
                         
 
         self.T = self.c.temperature
@@ -127,6 +133,10 @@ class CNN_MNIST_Dual(nn.Module):
     def forward_h(self, z):
         logit_h = self.habitual(z)
         return logit_h
+    
+    def predict_entropy(self, z):
+        entropy = self.entropy_predictor(z)
+        return entropy
 
 
 
@@ -156,24 +166,37 @@ class Trainer:
                     self.optimizer.zero_grad()
                     data = data.to(self.device)
                     target = target.to(self.device)
-                    logit_c,logit_h = self.model(data)
+                    
+                    # Forward pass
+                    z = self.model.encode(data)
+                    logit_h = self.model.forward_h(z)
+                    logit_c = self.model.forward_c(z)
+                    
+                    # Compute entropy for all batch
+                    #expected_entropy = self.model.predict_entropy(z).squeeze()
+                    
                     # Softmax for "real" task
                     softmax_h = F.softmax(logit_h, dim=1)
                     softmax_c = F.softmax(logit_c, dim=1)
+                    
                     # Logsoftmax for distillation
                     soft_student = F.log_softmax(logit_h/self.T, dim=1)
                     soft_target =  F.softmax(logit_c/self.T, dim=1)
+                    
+                    # Compute entropy for all batch 
+                    entropy_h = -torch.sum(softmax_h*torch.log(softmax_h),dim=1)
+                    entropy_c = -torch.sum(softmax_c*torch.log(softmax_c),dim=1)
                     
     
                     
                     # Compute losses 
                     loss_control_hard = self.criterion(softmax_c, target)
                     loss_habitual_hard = self.criterion(softmax_h, target)/self.T**2
-                    
-                    # Compute KL divergence
-                    loss_kl = F.kl_div(input=soft_student, target=soft_target, reduction='batchmean',log_target=False) #* self.kl_coeff
+                    loss_kl = F.kl_div(input=soft_student, target=soft_target, reduction='batchmean',log_target=False) 
+                    # MSE between entropy and expected entropy
+                    #loss_entropy = F.mse_loss(entropy_c, expected_entropy)
                     # Sum up all losses
-                    loss = loss_control_hard + loss_habitual_hard + loss_kl
+                    loss = loss_control_hard + loss_habitual_hard + loss_kl #+ loss_entropy
                     loss.backward()
                     self.optimizer.step() 
                     
@@ -193,12 +216,18 @@ class Trainer:
                         control_line = 'C: {:.6f} '.format(save_loss_control_hard[-1])
                         habitual_line = 'H: {:.6f} '.format(save_loss_habitual_hard[-1])
                         percent = '(Completion: {:.0f}%) '.format(100. * batch_idx / len(self.train_data))
+                        entropy_co = 'Entropy_C: {:.6f} '.format(entropy_c.mean().item())
+                        entropy_ha = 'Entropy_H: {:.6f} '.format(entropy_h.mean().item())     
+                        #expected_entropy_p = 'E_entropy: {:.6f} '.format(expected_entropy.mean().item())
 
                         print(colored(epoch, 'cyan'), end='')
                         print(colored(loss_line, 'red'), end=' ')
                         print(colored(kl_line, 'yellow'), end=' ')
                         print(colored(control_line, 'green'), end=' ')
                         print(colored(habitual_line, 'light_green'), end='')
+                        #print(colored(expected_entropy_p , 'light_red'), end='')
+                        print(colored(entropy_co, 'dark_grey'), end='')
+                        print(colored(entropy_ha, 'light_grey'), end='')
                         print(colored(percent, 'magenta'), end='\n')
                         
                         
