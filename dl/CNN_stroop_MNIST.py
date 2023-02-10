@@ -1,17 +1,19 @@
-import os; os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+import os 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-import torchvision 
 from torchvision import datasets, transforms
-from torchvision.datasets import MNIST
-import pathlib 
-from torch.utils.tensorboard import SummaryWriter
-from torchvision.models.feature_extraction import get_graph_node_names,create_feature_extractor
+import pathlib
 import matplotlib.pyplot as plt
-from datasets import StroopMNIST
+from dataclasses import dataclass
+from omegaconf import OmegaConf,DictConfig
+import hydra
+import pickle
 import numpy as np
+import pandas as pd
+from utils import Logger,compare_beliefs, VariationalDropout
+from termcolor import colored
 
 # Hyperparams   
 batch_size = 50
@@ -30,25 +32,6 @@ test_loader = torch.utils.data.DataLoader(stroop_mnist_test, batch_size=batch_si
 log_dir = pathlib.Path.cwd() / 'logs'
 writer = SummaryWriter(log_dir=log_dir)
 
-
-# Initialize MLP
-
-class FiLMBlock(nn.Module):
-    def __init__(self,target_shape):
-        super(FiLMBlock, self).__init__()
-        
-        # Initialize gamma and beta
-        self.gamma = nn.Parameter(torch.randn(target_shape[0], target_shape[1], 1, 1))
-        self.beta = nn.Parameter(torch.randn(target_shape[0], target_shape[1], 1, 1))
-        
-      
-    def forward(self, x):
-        # To note that I could loop and use non linear activations between each modulation 
-        x = self.gamma * x + self.beta
-        
-        # If not the same batch size, then multiply only on the dimensions of the x 
-
-        return x
 
 class CNN_MNIST(nn.Module):
 
