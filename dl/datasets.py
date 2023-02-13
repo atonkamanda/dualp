@@ -6,14 +6,15 @@ import numpy as np
 import matplotlib.pyplot as plt
 from PIL import Image
 
-class StroopMNIST(MNIST):
-    """
-    Overrides the MNIST dataset to change the getitem function.
-    """
-    COLORS = ['red', 'green', 'yellow', 'blue', 'orange', 'purple', 'cyan', 'pink', 'greenyellow', 'magenta']
-    COLORS_COMB = [('red', 'green'), ('yellow', 'blue'), ('orange', 'purple'), ('cyan', 'purple'), ('greenyellow', 'magenta'),
-                   ('red', 'cyan'), ('orange', 'purple'), ('green', 'pink'), ('pink', 'blue'), ('magenta', 'yellow')]
-    CHMAP = {
+class StroopMNIST(MNIST): 
+    def __init__(self, root= './stroop_mnist', train=True, transform=None,
+                 transform_fp=None, download=True, generate_new_data=True,save_data=True) -> None:
+        super(StroopMNIST, self).__init__(root, train,transform, None, download) 
+        self.train = train
+        self.transform_fp = transform_fp
+        # Each colors is associated with a particular digit 
+        self.colors = ['red', 'green', 'yellow', 'blue', 'orange', 'purple', 'cyan', 'pink', 'greenyellow', 'magenta']
+        self.rgb = {
         "red": (torch.tensor([255.0, 0, 0])),
         "green": (torch.tensor([0, 255.0, 0])),
         "yellow": (torch.tensor([255.0, 255.0, 0])),
@@ -24,14 +25,8 @@ class StroopMNIST(MNIST):
         "pink": (torch.tensor([255.0, 192.0, 203.0])),
         "greenyellow": (torch.tensor([173.0, 255.0, 47.0])),
         "magenta": (torch.tensor([255.0, 0, 255.0]))
-    }
- 
-    def __init__(self, root= './stroop_mnist' , color_mode='fg', train=True, transform=None,
-                 transform_fp=None, download=True, generate_new_data=True,save_data=True) -> None:
-        super(StroopMNIST, self).__init__(root, train,transform, None, download) 
-        self.train = train
-        self.transform_fp = transform_fp
-        self.color_mode = color_mode
+            }
+
 
     
         if generate_new_data:
@@ -40,10 +35,7 @@ class StroopMNIST(MNIST):
             self.data = self.data[perm] 
             self.targets = self.targets[perm]
             self.count = 0
-            # Split the data into train and test
-            # Load existing data if it exists
-
-            self.colored_data = [self.color_fg(self.data[i], self.targets[i]) for i in range(self.data.shape[0])]
+            self.colored_data = [self.color_MNIST(self.data[i], self.targets[i]) for i in range(self.data.shape[0])]
             self.data = [self.colored_data[i][0] for i in range(len(self.data))]
             self.targets = [self.colored_data[i][1] for i in range(len(self.data))]
             self.data = torch.stack(self.data)
@@ -69,37 +61,28 @@ class StroopMNIST(MNIST):
         return img, target
     
 
-    def color_fg(self, img, target):
+    def color_MNIST(self, img, target):
+        # Get the congruent color 80% of the time
         if self.train:
-            # Get the congruent color 80% of the time
             if random.random() < 0.8:
-                fg_color = StroopMNIST.COLORS[target]
+                color = self.colors[target]
                 target = torch.tensor([target,target]) # Congruent sample 
             else: 
-                rand_target = random.randint(0, 9) # Get a random incongruent color 
-                # make sure the target is not the same as the foreground color 
+                # Get a random incongruent color 
+                rand_target = random.randint(0, 9) 
                 while rand_target == target:
                     rand_target = random.randint(0, 9) 
-
-                fg_color = StroopMNIST.COLORS[rand_target]
+                color = self.colors[rand_target]
                 target = torch.tensor([target,torch.tensor(rand_target)]) # Incongruent sample
         else:
-            rand_target = random.randint(0, 9) # Get a random incongruent color 
-                # make sure the target is not the same as the foreground color 
+            rand_target = random.randint(0, 9) 
             while rand_target == target:
                  rand_target = random.randint(0, 9) 
-
-            fg_color = StroopMNIST.COLORS[rand_target]
+            color = self.colors[rand_target]
             target = torch.tensor([target,torch.tensor(rand_target)])
-        color_img = img.unsqueeze(dim=-1).repeat(1, 1, 3).float() # Repeat the image 3 times to get the 3 channels
-        img[img < 75] = 0.0 # Threshold the image to get the foreground
-        # img[img >= 75] = 255.0
-
-        
-        color_img[img != 0] = StroopMNIST.CHMAP[fg_color] 
-
-        #color_img[img == 0] = (torch.tensor([0, 0, 0])) # 
-        # color_img[img == 0] = (torch.tensor([255.0, 255.0, 255.0]))
+        color_img = img.unsqueeze(dim=-1).repeat(1, 1, 3).float() # Repeat the image 3 times to get 3 channels
+        img[img < 75] = 0.0 # Threshold the image to get the foreground    
+        color_img[img != 0] = self.rgb[color] 
 
 
         self.count += 1
@@ -107,42 +90,6 @@ class StroopMNIST(MNIST):
             self.train = False
             
         return color_img/255.0,target
-
-    def color_bg(self, img, target):
-        if self.train:
-            bg_color = StroopMNIST.COLORS[target]
-        else:
-            rand_target = random.randint(0, 9)
-            bg_color = StroopMNIST.COLORS[rand_target]
-
-        color_img = img.unsqueeze(dim=-1).repeat(1, 1, 3).float()
-        img[img < 75] = 0.0
-        img[img >= 75] = 255.0
-
-        # color_img /= 255.0
-        color_img[img != 0] *= torch.tensor([0, 0, 0])
-        color_img[img == 0] = (StroopMNIST.CHMAP[bg_color])
-        
-        # [64, 28, 28, 3] -> [64, 3, 28, 28]
-        #color_img = color_img.permute(0, 3, 1, 2)
-       
-        
-        return color_img
-
-    def color_comb(self, img, target):
-        if self.train:
-            bg_color, fg_color = StroopMNIST.COLORS_COMB[target]
-        else:
-            rand_target = random.randint(0, 9)
-            bg_color, fg_color = StroopMNIST.COLORS_COMB[rand_target]
-
-        color_img = img.unsqueeze(dim=-1).repeat(1, 1, 3).float()
-        img[img < 50] = 0.0
-
-        color_img[img == 0] = StroopMNIST.CHMAP[bg_color]
-        color_img[img != 0] = (StroopMNIST.CHMAP[fg_color]) #/255.0)
-
-        return color_img
     
 
 
@@ -150,7 +97,7 @@ class StroopMNIST(MNIST):
 
 if __name__ == '__main__': # Prevents the code from running when imported as a module   
    
-    stroop_mnist = StroopMNIST(root= './stroop_mnist' , color_mode='fg', train=True, download=True, generate_new_data=True, save_data=True)
+    stroop_mnist = StroopMNIST(root= './stroop_mnist' ,train=True, download=True, generate_new_data=True, save_data=True)
     # Take the 50 0000 first images of stroop mnist train 
     stroop_mnist_train = torch.utils.data.Subset(stroop_mnist, range(50000))
     stroop_mnist_test = torch.utils.data.Subset(stroop_mnist, range(50000, 60000))

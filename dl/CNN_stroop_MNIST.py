@@ -1,4 +1,5 @@
 import os 
+import os 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -11,9 +12,6 @@ from omegaconf import OmegaConf,DictConfig
 import hydra
 import pickle
 import numpy as np
-import pandas as pd
-from utils import Logger,compare_beliefs, VariationalDropout
-from termcolor import colored
 
 # Hyperparams   
 batch_size = 50
@@ -33,6 +31,25 @@ log_dir = pathlib.Path.cwd() / 'logs'
 writer = SummaryWriter(log_dir=log_dir)
 
 
+# Initialize MLP
+
+class FiLMBlock(nn.Module):
+    def __init__(self,target_shape):
+        super(FiLMBlock, self).__init__()
+        
+        # Initialize gamma and beta
+        self.gamma = nn.Parameter(torch.randn(target_shape[0], target_shape[1], 1, 1))
+        self.beta = nn.Parameter(torch.randn(target_shape[0], target_shape[1], 1, 1))
+        
+      
+    def forward(self, x):
+        # To note that I could loop and use non linear activations between each modulation 
+        x = self.gamma * x + self.beta
+        
+        # If not the same batch size, then multiply only on the dimensions of the x 
+
+        return x
+
 class CNN_MNIST(nn.Module):
 
     def __init__(self):
@@ -46,207 +63,218 @@ class CNN_MNIST(nn.Module):
         self.film1 = FiLMBlock(target_shape=(50, 10, 24, 24))
         self.film2 = FiLMBlock(target_shape=(50, 20, 8, 8))
         
-        self.mode2 = False
-    def forward(self, x):
-        # (64,3,28,28)
-        x = self.conv1(x)
-        #if self.mode2==True:
-            #x = self.film1(x)
+    def forward_c(self, z):
+        logit_c = self.control(z)
+        return logit_c
         
-        x = F.relu(x)
-        # (64,10,24,24)
-        x = F.max_pool2d(x, 2)
-        x = self.conv2(x)
-
-        # (64,20,8,8)   
-        if self.mode2==True:
-            x = self.film2(x)
-        x = F.relu(x)
-        #x = self.film2(x)
-        x = F.max_pool2d(x, 2)
-        x = x.contiguous().view(-1, 320) 
-        # (64,320)
-        x = self.fc1(x)
-        x = F.relu(x)
-        # (64,50)
-        x = self.fc2(x)
-        x = F.softmax(x, dim=1)
-        # Compute entropy of the output distribution
-            
-        return x 
+    def forward_h(self, z):
+        logit_h = self.habitual(z)
+        return logit_h
     
 
 
-class CNN_critic(nn.Module):    
+class ACC(nn.Module):
 
-    def __init__(self):
-        super(CNN_critic, self).__init__()
+    def __init__(self,config):
+        super(ACC, self).__init__()
         # CNN for MNIST dataset
-        self.conv1 = nn.Conv2d(3, 10, kernel_size=5)
-        self.conv2 = nn.Conv2d(10, 20, kernel_size=5)
-        self.fc1 = nn.Linear(320, 50)
-        self.fc2 = nn.Linear(50, 10)
-        self.error_prediction_layer = nn.Linear(10, 1)
-    def forward(self, x):
-        x = self.conv1(x)
-        x = F.relu(x)
-        x = F.max_pool2d(x, 2)
-        x = self.conv2(x)
-        x = F.relu(x)
-        x = F.max_pool2d(x, 2)
-        # [64, 20, 4, 4] -> [64, 320]
-        x = x.contiguous().view(-1, 320) # Use contiguous to avoid error because of view and 
-        x = x.view(-1, 320)
-        x = self.fc1(x)
-        x = F.relu(x)
-        x = self.fc2(x)
-        # Binarry classification head
-        x = self.error_prediction_layer(x)
-        x = torch.sigmoid(x)
+        self.c = config
     
-        #print(x)
-        # Print norm of gradient of the critic
+        
+        self.entropy_predictor = nn.Sequential(
+                                 nn.Linear(320, 50),
+                                 nn.ReLU(),
+                                 nn.Linear(50, 1))
+        
+        
+        self.switch  = nn.Sequential(
+                        nn.Linear(320, 1))
+
+    def predict_entropy(self, z):
+        entropy = self.entropy_predictor(z)
+        return entropy
     
-     
-        return x
-
+    def compute_mode(self, z):
+        # Switch between habitual and control using an actor critic method with predict entropy as the critic
+        choice  = self.switch(z)
+        # Output a probability between 0 and 1
+        choice = torch.sigmoid(choice)
+        return choice
+                    
+    
+class Trainer:
+    def __init__(self, config:Config):
+        self.c = config
+        self.seed = self.c.seed
+        self.device = self.c.device
+        self.logger = Logger()
+        self.train_data, self.test_data = DataManager(self.c).load_MNIST()
+        self.model = CNN_MNIST_Dual(self.c).to(self.device)
+        self.acc = ACC(self.c).to(self.device) 
+        self.criterion = nn.CrossEntropyLoss()
+        self.optimizer = optim.Adam(self.model.parameters(), lr=0.001)
         
-
-
-
-def train(epoch,model):
-    model.train()
-    save_loss = []
-    save_control_decision = []
-    save_accuracy = []
-    for e in range(epoch):        
-      for batch_idx, (data, target) in enumerate(train_loader):
-          optimizer.zero_grad()
-          optimizer_critic.zero_grad()
-          optimizer_film.zero_grad()
-          data = data.to(device)
-          # [64, 28, 28, 3] -> [64, 3, 28, 28]
-          data = data.permute(0, 3, 1, 2)
-          target = target.to(device)
-          # Only keep the first element of the (64,2) tensor
-          target = target[:,0]
         
-          control_decision = torch.mean(critic(data))
-          # Print the gradient of the critic
-          print(control_decision.grad)
-          #print(control_decision)
-          if control_decision > 0.5:
-                model.mode2 = True
-          else:
-                model.mode2 = False
-          output = model(data)
-          loss = criterion(output, target) 
-          if control_decision > 0.5:
-              loss = loss + loss * control_cost 
-          loss.backward()
-          print(control_decision.grad)
-          optimizer.step()
-          optimizer_film.step()
-          # Detach the loss from the graph
-          #loss = loss.detach()
+        
+        entropy_params =  list(self.acc.entropy_predictor.parameters())
+        switch_params =  list(self.acc.switch.parameters())
+        self.optimizer_entropy = optim.Adam(entropy_params, lr=0.001)
+        self.optimizer_switch = optim.Adam(switch_params, lr=0.001)
+        
+        # Hyperparameters
+        self.T = self.c.temperature
+        self.kl_coeff = self.c.kl_coeff
+    def train(self, epoch):
+        self.model.train()
+        save_loss = []
+        save_loss_kl = []
+        save_loss_control_hard = []
+        save_loss_habitual_hard = []
+        save_accuracy = []
+        for e in range(epoch):
+            for batch_idx, (data, target) in enumerate(self.train_data):
+                    self.optimizer.zero_grad()
+                    self.optimizer_switch.zero_grad()
+                    
+                    
+                    data = data.to(self.device)
+                    target = target.to(self.device)
+                    
+                    # Forward pass
+                    z = self.model.encode(data)
+                    logit_h = self.model.forward_h(z)
+                    logit_c = self.model.forward_c(z)
+                    
+                    
+                    # Compute entropy for all batch
+                    choice = self.acc.compute_mode(z)
+                    # argmax to get the mode
+                    mode = torch.argmax(choice,dim=1)
+                    
+                    print(mode)
+                    #expected_entropy = self.model.predict_entropy(z).squeeze()
+                    
+                    # Softmax for "real" task
+                    softmax_h = F.softmax(logit_h, dim=1)
+                    softmax_c = F.softmax(logit_c, dim=1)
+                    
+                    # Logsoftmax for distillation
+                    soft_student = F.log_softmax(logit_h/self.T, dim=1)
+                    soft_target =  F.softmax(logit_c/self.T, dim=1)
+                    
+                    # Compute entropy for all batch 
+                    entropy_h = -torch.sum(softmax_h*torch.log(softmax_h),dim=1)
+                    entropy_c = -torch.sum(softmax_c*torch.log(softmax_c),dim=1)
+                    
+    
+                    
+                    # Compute losses 
+                    loss_control_hard = self.criterion(softmax_c, target)
+                    loss_habitual_hard = self.criterion(softmax_h, target)/self.T**2
+                    loss_kl = F.kl_div(input=soft_student, target=soft_target, reduction='batchmean',log_target=False) 
+                    # MSE between entropy and expected entropy
+                    
+                    #loss_entropy = F.mse_loss(entropy_c, expected_entropy)
+                    # Sum up all losses
+                    loss = loss_control_hard + loss_habitual_hard + loss_kl # loss_entropy
+                    loss.backward()
+                    self.optimizer.step() 
+                    
+                    
+                    
+                    
+                    loss_switch = -torch.log(choice) * loss 
+                    loss_switch = loss_switch.mean()
+                    # Zero grad 
+                    self.optimizer_switch.zero_grad()
+                    loss_switch.backward()
+                    self.optimizer_switch.step()
+                    
+                    # Save losses and accuracy       
+                    save_loss.append(loss.item()) 
+                    save_loss_kl.append(loss_kl.item())
+                    save_loss_control_hard.append(loss_control_hard.item())
+                    save_loss_habitual_hard.append(loss_habitual_hard.item())
+                    
+                
+                        
+                    if batch_idx % 100 == 0:
+                        #print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(e+1, batch_idx * len(data), len(self.train_data.dataset),100. * batch_idx / len(self.train_data), loss.item()))
+                        epoch = 'E: {:.0f} '.format(e+1, epoch)
+                        loss_line = 'Loss: {:.6f} '.format(save_loss[-1])
+                        kl_line = 'KL: {:.6f} '.format(save_loss_kl[-1])
+                        control_line = 'C: {:.6f} '.format(save_loss_control_hard[-1])
+                        habitual_line = 'H: {:.6f} '.format(save_loss_habitual_hard[-1])
+                        percent = '(Completion: {:.0f}%) '.format(100. * batch_idx / len(self.train_data))
+                        entropy_co = 'Entropy_C: {:.6f} '.format(entropy_c.mean().item())
+                        entropy_ha = 'Entropy_H: {:.6f} '.format(entropy_h.mean().item())     
+                        #expected_entropy_p = 'E_entropy: {:.6f} '.format(expected_entropy.mean().item())
+
+                        print(colored(epoch, 'cyan'), end='')
+                        print(colored(loss_line, 'red'), end=' ')
+                        print(colored(kl_line, 'yellow'), end=' ')
+                        print(colored(control_line, 'green'), end=' ')
+                        print(colored(habitual_line, 'light_green'), end='')
+                        #print(colored(expected_entropy_p , 'light_red'), end='')
+                        print(colored(entropy_co, 'dark_grey'), end='')
+                        print(colored(entropy_ha, 'light_grey'), end='')
+                        print(colored(percent, 'magenta'), end='\n')
+                        
+                        
+                        #compare_beliefs(softmax_c,softmax_h,kl=loss_kl.item(),name1='Control',name2='Habitual',reduction=True)
+              
+            print('Accuracy at epoch', e+1)
+            accuracy  = self.eval().item()
+            save_accuracy.append(accuracy)
+        # Plot loss and accuracy
+        self.logger.add_log('Train loss', save_loss)
+        self.logger.add_log('Train loss KL', save_loss_kl)
+        self.logger.add_log('Train loss control hard', save_loss_control_hard)
+        self.logger.add_log('Train loss habitual hard', save_loss_habitual_hard)
+        self.logger.add_log('Accuracy', save_accuracy)
+        self.logger.write_to_csv('log.csv')
+        # Save model
+        if self.c.save_model:
+            torch.save(self.model.state_dict(), "./saved_models/mnist_cnn.pt")
+    def eval(self):
+        self.model.eval()
+        test_loss = 0
+        correct = 0
+        for data, target in self.test_data:
+            data = data.to(self.device)
+            target = target.to(self.device)
+            control_hard,habitual_hard = self.model(data)
+        
+            # sum up batch loss
+            test_loss += torch.mean(self.criterion(control_hard, target)).item()
+            # Compute accuracy 
+            pred = control_hard.data.max(1, keepdim=True)[1]
+            correct += pred.eq(target.data.view_as(pred)).cpu().sum()
+        
+        test_loss /= len(self.test_data.dataset)
+        print('\nTest set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(test_loss, correct, len(self.test_data.dataset),100. * correct / len(self.test_data.dataset)))
+        # Return accuracy 
+        return correct / len(self.test_data.dataset)
+
             
+#@hydra.main(version_base=None, config_path="conf", config_name="config")
+def main() -> None: # cfg : DictConfig
+    # Load default config
+    default_config = OmegaConf.structured(Config)
+    # Merge default config with run config, run config overrides if there is a conflict
+    #config = OmegaConf.merge(default_config, cfg)
+    #OmegaConf.save(config, 'config.yaml') 
+    config = default_config
     
-          
-          #critic_loss = criterion_critic(prediction_error, loss)
-          #critic.backward()
-          optimizer_critic.step()
-          save_loss.append(loss.item())
-          save_control_decision.append(control_decision.item())
+    #hydra_cfg = hydra.core.hydra_config.HydraConfig.get()
+    """job_num = hydra_cfg.job.num
+    print(f'Hydra job number: {job_num}')
+    config.job_num = job_num"""
     
-          
-                 
-          if batch_idx % 100 == 0:
-              print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(e+1, batch_idx * len(data), len(train_loader.dataset),100. * batch_idx / len(train_loader), loss.item()))
-      print('Epoch:', e+1)
-      accuracy = test()
-      save_accuracy.append(accuracy)
-      
-      # plot the predicted loss
-    plt.plot(save_loss)
-    # Save the plot
-    plt.savefig('loss.png')
-    plt.show()
+    trainer = Trainer(config)
+    trainer.train(config.epoch)
     
-    plt.plot(save_control_decision)
-    plt.savefig('control_decision.png')
-    plt.show()
-    # Merge
     
-    plt.plot(save_accuracy)
-    plt.savefig('accuracy.png')
-    plt.show()
-    """ 
-    # Merge the three plots
-    fig, ax1 = plt.subplots()
-    ax1.plot(save_loss, 'b-')
-    ax1.set_xlabel('Epoch')
-    ax1.set_ylabel('Loss', color='b')
-    ax1.tick_params('y', colors='b')
-    ax2 = ax1.twinx()
-    ax2.plot(save_prediction_error, 'r-')
-    ax2.set_ylabel('Critic Loss', color='r')
-    ax2.tick_params('y', colors='r')
-    fig.tight_layout()
-    plt.savefig('loss_critic_loss.png')
-    plt.show()"""
-   
-    
-            
-def test():
-    model.eval()
-    critic.eval()
-    test_loss = 0
-    correct = 0
-    for data, target in test_loader:
-        data = data.to(device)
-        # [64, 28, 28, 3] -> [64, 3, 28, 28]
-        data = data.permute(0, 3, 1, 2)
-        target = target.to(device)
-        target = target[:,0]
-        
-        # Cognitive control decision 
-        control_decision = torch.mean(critic(data))
-        if control_decision > 0.5:
-                model.mode2 = True
-        else:
-            model.mode2 = False
-        output = model(data)
-    
-        # sum up batch loss
-        test_loss += torch.mean(criterion(output, target)).item()
-        # Compute accuracy 
-        pred = output.data.max(1, keepdim=True)[1]
-        correct += pred.eq(target.data.view_as(pred)).cpu().sum()
-    
-    test_loss /= len(test_loader.dataset)
-    print('\nTest set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(test_loss, correct, len(test_loader.dataset),100. * correct / len(test_loader.dataset)))
-    # Return the accuracy 
-    return correct / len(test_loader.dataset)
-        
-
- 
-
-
-
-model = CNN_MNIST().to(device)
-# Print the number of parameters of the model
-print(sum(p.numel() for p in model.parameters() if p.requires_grad))
-critic = CNN_critic().to(device)
-
-criterion = nn.CrossEntropyLoss()
-criterion_critic = nn.MSELoss()
-
-
-optimizer_film = optim.Adam(model.film2.parameters(), lr=0.2) # For some reason it doesn't learn with SGD 
-
-
-optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.5)
-optimizer_critic = optim.SGD(critic.parameters(), lr=0.01,momentum=0.5)
-#optimizer = optim.Adam(critic.parameters(), lr=0.2)
-#optimizer_critic = optim.Adam(critic.parameters(), lr=0.2)
-train(n_epochs,model)
+if __name__ == '__main__':
+    main()
+    print('Finished correctly')

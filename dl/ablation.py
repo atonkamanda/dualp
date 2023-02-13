@@ -13,6 +13,7 @@ import pickle
 import numpy as np
 import pandas as pd
 from utils import Logger,compare_beliefs, VariationalDropout
+from plots import compare_beliefs,display_images_with_entropies,display_images_with_entropies_single
 from termcolor import colored
 
 # Class for the ablative study
@@ -42,7 +43,7 @@ class Config:
     
     
     # Control hyperparameters
-    batch_size : int = 64 
+    batch_size : int = 30
     
     # Habitual network hyperparameters
     temperature : float = 4.0
@@ -111,12 +112,17 @@ class Eval:
             target = target.to(self.device)
     
             z = self.model.encode(data)
-            h_prediction = self.model.forward_h(z)
-        
+            logit_h = self.model.forward_h(z)
+                
+            softmax_h = F.softmax(logit_h, dim=1)
+            entropies = -torch.sum(softmax_h * torch.log(softmax_h), dim=1, keepdim=True)
+            display_images_with_entropies_single(data, entropies, num_images_per_row=5)
+            
+            
             # sum up batch loss
-            test_loss += torch.mean(self.criterion(h_prediction, target)).item()
+            test_loss += torch.mean(self.criterion(softmax_h, target)).item()
             # Compute accuracy 
-            pred = h_prediction.data.max(1, keepdim=True)[1]
+            pred = softmax_h.data.max(1, keepdim=True)[1]
             correct += pred.eq(target.data.view_as(pred)).cpu().sum()
         
         test_loss /= len(self.test_data.dataset)
