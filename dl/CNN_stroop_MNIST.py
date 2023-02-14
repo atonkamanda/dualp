@@ -1,5 +1,4 @@
 import os 
-import os 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -12,56 +11,106 @@ from omegaconf import OmegaConf,DictConfig
 import hydra
 import pickle
 import numpy as np
+import pandas as pd
+from utils import Logger,compare_beliefs, VariationalDropout
+from termcolor import colored
+import time    
+@dataclass
+class Config:
+    
+    # Reproductibility and hardware 
+    seed : int = 0
+    device : str = 'cuda' if torch.cuda.is_available() else 'cpu'
+    load_model : bool = False
+    job_num : int = 0
 
-# Hyperparams   
-batch_size = 50
-n_epochs = 1
-generate_new_data = False
-control_cost = 0.025
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-seed = 0 
+    # Logging and saving 
+    logdir : str = pathlib.Path.cwd() / 'logs'
+    savedir : str = pathlib.Path.cwd() / 'saved_models'
+    save_model : bool = True
 
-stroop_mnist = StroopMNIST(root= './stroop_mnist' , color_mode='fg', train=True, download=True, generate_new_data=False, save_data=False)
-stroop_mnist_train = torch.utils.data.Subset(stroop_mnist, range(50000))
-stroop_mnist_test = torch.utils.data.Subset(stroop_mnist, range(50000, 60000))
-train_loader = torch.utils.data.DataLoader(stroop_mnist_train, batch_size=batch_size, shuffle=True,pin_memory=True) 
-test_loader = torch.utils.data.DataLoader(stroop_mnist_test, batch_size=batch_size, shuffle=False, pin_memory=True)
+    
+    
+    
+    # Task hyperparameters 
+    dataset : str = 'MNIST'
+    epoch : int = 10# The number of update 
+    
+    
+    # Control hyperparameters
+    batch_size : int = 64 
+    precision : float = 0.1
+    
+    # Habitual network hyperparameters
+    temperature : float = 4.0
+    lr : float = 0.001
+    
+    # Loses coefficients
+    kl_coeff : float = 5
+    # Compression 
+    variational_dropout : bool = False
+    quantization : bool = False
+    
+class DataManager():
+    def __init__(self,config):
+        self.c = config
+        self.dataset = config.dataset
+        self.batch_size = config.batch_size
+        
+    def load_MNIST(self):
+        # Loading MNIST
+        train_dataset = datasets.MNIST(root='./data/',
+                                    train=True,
+                                    transform=transforms.ToTensor(),
+                                    download=True,
+                                    )
 
-log_dir = pathlib.Path.cwd() / 'logs'
-writer = SummaryWriter(log_dir=log_dir)
+        test_dataset = datasets.MNIST(root='./data/',
+                                    train=False,
+                                    transform=transforms.ToTensor())
 
+
+        train_loader = torch.utils.data.DataLoader(dataset=train_dataset,
+                                                batch_size=self.c.batch_size,
+                                                shuffle=True,
+                                                pin_memory=True)
+
+        test_loader = torch.utils.data.DataLoader(dataset=test_dataset,
+                                                batch_size=self.c.batch_size,
+                                                shuffle=False,
+                                                pin_memory=True)
+        return train_loader,test_loader
 
 # Initialize MLP
 
-class FiLMBlock(nn.Module):
-    def __init__(self,target_shape):
-        super(FiLMBlock, self).__init__()
-        
-        # Initialize gamma and beta
-        self.gamma = nn.Parameter(torch.randn(target_shape[0], target_shape[1], 1, 1))
-        self.beta = nn.Parameter(torch.randn(target_shape[0], target_shape[1], 1, 1))
-        
-      
-    def forward(self, x):
-        # To note that I could loop and use non linear activations between each modulation 
-        x = self.gamma * x + self.beta
-        
-        # If not the same batch size, then multiply only on the dimensions of the x 
+class CNN_MNIST_Dual(nn.Module):
 
-        return x
-
-class CNN_MNIST(nn.Module):
-
-    def __init__(self):
-        super(CNN_MNIST, self).__init__()
+    def __init__(self,config):
+        super(CNN_MNIST_Dual, self).__init__()
         # CNN for MNIST dataset
-        self.conv1 = nn.Conv2d(3, 10, kernel_size=5)
-        self.conv2 = nn.Conv2d(10, 20, kernel_size=5)
-        self.fc1 = nn.Linear(320, 50)
-        self.fc2 = nn.Linear(50, 10)
-        # Initialize FiLM blocks
-        self.film1 = FiLMBlock(target_shape=(50, 10, 24, 24))
-        self.film2 = FiLMBlock(target_shape=(50, 20, 8, 8))
+        self.c = config
+        
+        self.encoder = nn.Sequential(
+                        nn.Conv2d(1, 10, kernel_size=5),
+                        nn.ReLU(),
+                        nn.MaxPool2d(2)) # Shape : 10 x 12 x 12 if flatten
+        self.control = nn.Sequential(
+                        nn.Conv2d(10, 20, kernel_size=5), # Shape : 20 x 8 x 8
+                        nn.ReLU(),
+                        nn.MaxPool2d(2), # Shape : 20 x 4 x 4
+                        nn.Linear(320, 50), # Shape : 50
+                        nn.ReLU(),
+                        nn.Linear(50, 10))
+        
+        self.habitual = nn.Sequential(
+                        nn.Linear(320, 10))
+        
+                        
+    
+    def encode(self, x):
+        z  = self.encoder(x)
+        z = z.contiguous().view(-1, 320)
+        return z
         
     def forward_c(self, z):
         logit_c = self.control(z)
@@ -71,37 +120,8 @@ class CNN_MNIST(nn.Module):
         logit_h = self.habitual(z)
         return logit_h
     
+  
 
-
-class ACC(nn.Module):
-
-    def __init__(self,config):
-        super(ACC, self).__init__()
-        # CNN for MNIST dataset
-        self.c = config
-    
-        
-        self.entropy_predictor = nn.Sequential(
-                                 nn.Linear(320, 50),
-                                 nn.ReLU(),
-                                 nn.Linear(50, 1))
-        
-        
-        self.switch  = nn.Sequential(
-                        nn.Linear(320, 1))
-
-    def predict_entropy(self, z):
-        entropy = self.entropy_predictor(z)
-        return entropy
-    
-    def compute_mode(self, z):
-        # Switch between habitual and control using an actor critic method with predict entropy as the critic
-        choice  = self.switch(z)
-        # Output a probability between 0 and 1
-        choice = torch.sigmoid(choice)
-        return choice
-                    
-    
 class Trainer:
     def __init__(self, config:Config):
         self.c = config
@@ -110,20 +130,12 @@ class Trainer:
         self.logger = Logger()
         self.train_data, self.test_data = DataManager(self.c).load_MNIST()
         self.model = CNN_MNIST_Dual(self.c).to(self.device)
-        self.acc = ACC(self.c).to(self.device) 
         self.criterion = nn.CrossEntropyLoss()
         self.optimizer = optim.Adam(self.model.parameters(), lr=0.001)
         
-        
-        
-        entropy_params =  list(self.acc.entropy_predictor.parameters())
-        switch_params =  list(self.acc.switch.parameters())
-        self.optimizer_entropy = optim.Adam(entropy_params, lr=0.001)
-        self.optimizer_switch = optim.Adam(switch_params, lr=0.001)
-        
         # Hyperparameters
         self.T = self.c.temperature
-        self.kl_coeff = self.c.kl_coeff
+        self.precision = self.c.precision
     def train(self, epoch):
         self.model.train()
         save_loss = []
@@ -132,96 +144,88 @@ class Trainer:
         save_loss_habitual_hard = []
         save_accuracy = []
         for e in range(epoch):
+            
+            
+            
             for batch_idx, (data, target) in enumerate(self.train_data):
+                    loss_control = 0
+                    start_time = time.time()
                     self.optimizer.zero_grad()
-                    self.optimizer_switch.zero_grad()
-                    
-                    
                     data = data.to(self.device)
                     target = target.to(self.device)
                     
-                    # Forward pass
+                    # Automatic processing 
                     z = self.model.encode(data)
                     logit_h = self.model.forward_h(z)
-                    logit_c = self.model.forward_c(z)
-                    
-                    
-                    # Compute entropy for all batch
-                    choice = self.acc.compute_mode(z)
-                    # argmax to get the mode
-                    mode = torch.argmax(choice,dim=1)
-                    
-                    print(mode)
-                    #expected_entropy = self.model.predict_entropy(z).squeeze()
-                    
-                    # Softmax for "real" task
                     softmax_h = F.softmax(logit_h, dim=1)
-                    softmax_c = F.softmax(logit_c, dim=1)
-                    
-                    # Logsoftmax for distillation
-                    soft_student = F.log_softmax(logit_h/self.T, dim=1)
-                    soft_target =  F.softmax(logit_c/self.T, dim=1)
-                    
-                    # Compute entropy for all batch 
                     entropy_h = -torch.sum(softmax_h*torch.log(softmax_h),dim=1)
-                    entropy_c = -torch.sum(softmax_c*torch.log(softmax_c),dim=1)
                     
-    
+                    entropy_h = torch.mean(entropy_h)
+                    # If there is too much uncertainty the mode 2 take over
+                    if entropy_h >=  self.precision:
+                        logit_c = self.model.forward_c(z)
+                        softmax_c = F.softmax(logit_c, dim=1)
+                        
                     
-                    # Compute losses 
-                    loss_control_hard = self.criterion(softmax_c, target)
-                    loss_habitual_hard = self.criterion(softmax_h, target)/self.T**2
-                    loss_kl = F.kl_div(input=soft_student, target=soft_target, reduction='batchmean',log_target=False) 
-                    # MSE between entropy and expected entropy
+                        # Logsoftmax for distillation
+                        soft_student = F.log_softmax(logit_h/self.T, dim=1)
+                        soft_target =  F.softmax(logit_c/self.T, dim=1)
+                        
+                         
+                        softmax_overwrite = (softmax_h + softmax_c)/2
+                        loss_overwrite = self.criterion(softmax_overwrite, target)
+                        loss_habit_hard = self.criterion(softmax_h, target)/self.T**2
+                        loss_kl = F.kl_div(input=soft_student, target=soft_target, reduction='batchmean',log_target=False) 
+                        loss = loss_overwrite + loss_habit_hard + loss_kl
+                        
+                        save_loss_kl.append(loss_kl.item())
+                        save_loss_control_hard.append(loss.item())
                     
-                    #loss_entropy = F.mse_loss(entropy_c, expected_entropy)
-                    # Sum up all losses
-                    loss = loss_control_hard + loss_habitual_hard + loss_kl # loss_entropy
+            
+                    else:
+                        loss = self.criterion(softmax_h, target) 
+                        save_loss_habitual_hard.append(loss.item())
+                     
+                    
                     loss.backward()
                     self.optimizer.step() 
                     
-                    
-                    
-                    
-                    loss_switch = -torch.log(choice) * loss 
-                    loss_switch = loss_switch.mean()
-                    # Zero grad 
-                    self.optimizer_switch.zero_grad()
-                    loss_switch.backward()
-                    self.optimizer_switch.step()
-                    
                     # Save losses and accuracy       
                     save_loss.append(loss.item()) 
-                    save_loss_kl.append(loss_kl.item())
-                    save_loss_control_hard.append(loss_control_hard.item())
-                    save_loss_habitual_hard.append(loss_habitual_hard.item())
+                    
                     
                 
                         
                     if batch_idx % 100 == 0:
-                        #print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(e+1, batch_idx * len(data), len(self.train_data.dataset),100. * batch_idx / len(self.train_data), loss.item()))
                         epoch = 'E: {:.0f} '.format(e+1, epoch)
                         loss_line = 'Loss: {:.6f} '.format(save_loss[-1])
-                        kl_line = 'KL: {:.6f} '.format(save_loss_kl[-1])
-                        control_line = 'C: {:.6f} '.format(save_loss_control_hard[-1])
-                        habitual_line = 'H: {:.6f} '.format(save_loss_habitual_hard[-1])
                         percent = '(Completion: {:.0f}%) '.format(100. * batch_idx / len(self.train_data))
-                        entropy_co = 'Entropy_C: {:.6f} '.format(entropy_c.mean().item())
                         entropy_ha = 'Entropy_H: {:.6f} '.format(entropy_h.mean().item())     
-                        #expected_entropy_p = 'E_entropy: {:.6f} '.format(expected_entropy.mean().item())
+               
+                            
 
                         print(colored(epoch, 'cyan'), end='')
                         print(colored(loss_line, 'red'), end=' ')
-                        print(colored(kl_line, 'yellow'), end=' ')
-                        print(colored(control_line, 'green'), end=' ')
-                        print(colored(habitual_line, 'light_green'), end='')
-                        #print(colored(expected_entropy_p , 'light_red'), end='')
-                        print(colored(entropy_co, 'dark_grey'), end='')
+                        if entropy_h >=  self.precision:
+                            kl_line = 'KL: {:.6f} '.format(save_loss_kl[-1])
+                            control_line = 'C: {:.6f} '.format(save_loss_control_hard[-1])
+                            print(colored('Mode: Control ', 'light_red'), end='')
+                            print(colored(kl_line, 'yellow'), end=' ')
+                            print(colored(control_line, 'green'), end=' ')
+                            #compare_beliefs(softmax_c,softmax_h,kl=loss_kl.item(),name1='Control',name2='Habitual',reduction=True)
+                            
+                        else:
+                            habitual_line = 'H: {:.6f} '.format(save_loss_habitual_hard[-1])
+                            print(colored('Mode: Habit ', 'light_blue'), end='')
+                            print(colored(habitual_line, 'light_green'), end='')
+                            
+                        
+                        # Print inference time 
                         print(colored(entropy_ha, 'light_grey'), end='')
+                        print(colored('Speed: {:.3f} '.format(time.time() - start_time), 'dark_grey'), end='')
                         print(colored(percent, 'magenta'), end='\n')
                         
                         
-                        #compare_beliefs(softmax_c,softmax_h,kl=loss_kl.item(),name1='Control',name2='Habitual',reduction=True)
               
             print('Accuracy at epoch', e+1)
             accuracy  = self.eval().item()
@@ -243,12 +247,25 @@ class Trainer:
         for data, target in self.test_data:
             data = data.to(self.device)
             target = target.to(self.device)
-            control_hard,habitual_hard = self.model(data)
+            # Automatic processing
+            z = self.model.encode(data)
+            logit_h = self.model.forward_h(z)
+            softmax_h = F.softmax(logit_h, dim=1)
+            entropy_h = -torch.sum(softmax_h*torch.log(softmax_h),dim=1)
+            entropy_h = torch.mean(entropy_h)
+            if entropy_h >=  self.precision:
+                logit_c = self.model.forward_c(z)
+                softmax_c = F.softmax(logit_c, dim=1)
+                softmax_overwrite = (softmax_h + softmax_c)/2
+                prediction = softmax_overwrite
+            else:
+                prediction = softmax_h
+
         
             # sum up batch loss
-            test_loss += torch.mean(self.criterion(control_hard, target)).item()
+            test_loss += torch.mean(self.criterion(prediction, target)).item()
             # Compute accuracy 
-            pred = control_hard.data.max(1, keepdim=True)[1]
+            pred = prediction.data.max(1, keepdim=True)[1]
             correct += pred.eq(target.data.view_as(pred)).cpu().sum()
         
         test_loss /= len(self.test_data.dataset)

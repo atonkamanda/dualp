@@ -2,3 +2,5 @@ __pycache__/
 dl/to_delete/
 dl/saved_models/
 dl/stroop_mnist/
+dl/outputs/
+dl/data/MNIST/raw/
