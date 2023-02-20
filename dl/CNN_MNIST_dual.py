@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 from utils import Logger,compare_beliefs, VariationalDropout
 from termcolor import colored
-import time    
+import time  
 @dataclass
 class Config:
     

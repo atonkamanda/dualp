@@ -13,6 +13,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torchvision import datasets, transforms
 from torch.distributions.categorical import Categorical
+from modules import ConvEncoder,ConvDecoder,Actor,Critic,RSSM,Reward_predictor
 # ML
 import matplotlib.pyplot as plt
 from omegaconf import OmegaConf,DictConfig
@@ -42,7 +43,7 @@ class Config:
     
     
     # Task hyperparameters 
-    train_env : str = 'LunarLander-v2'
+    train_env : str = "ALE/MsPacman-v5"
     task : str = 'run'
     epoch : int = 10 # The number of update 
     total_timesteps : int = 20000
@@ -83,25 +84,22 @@ class Agent(nn.Module):
         self.obs_size = 8
         self.act_size = 4
         self.state_size = 10
-        self.encoder = nn.Sequential(
-                        nn.Linear(self.obs_size,self.state_size),
-                        nn.ReLU())
+        # Initialize the modules
+        self.encoder = ConvEncoder()
+        self.decoder = ConvDecoder()
+        self.world_model = RSSM(action_shape=self.act_size)
+        self.actor = Actor(action_shape=self.act_size)
+        self.critic = Critic()
+        self.reward_predictor = Reward_predictor()
         
-        # Initialize the neural networks modules
-        self.actor = nn.Sequential(
-                        nn.Linear(self.state_size,self.act_size),
-                        nn.Softmax(dim=-1))
-        self.critic = nn.Sequential(
-                        nn.Linear(self.state_size,1))
+        self.model_based = nn.ModuleList([self.encoder,self.decoder,self.reward_predictor,self.world_model])
         
-        # Initialize the parameters 
-        self.policy_params = list(self.encoder.parameters()) + list(self.actor.parameters())
-        self.value_params = list(self.encoder.parameters()) + list(self.critic.parameters())
-
-        # Initialize them with rmsprop
-        self.policy_optimizer = optim.RMSprop(self.policy_params, lr=self.c.policy_lr)
-        self.value_optimizer = optim.RMSprop(self.value_params, lr=self.c.value_lr)
-
+        self.model_optimizer = optim.Adam(self.model_modules.parameters(), lr=self.c.model_lr,
+                                    weight_decay=self.c.weight_decay)
+        self.value_optimizer = optim.Adam(self.value.parameters(), lr=self.c.value_lr,
+                                          weight_decay=self.c.weight_decay)
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.c.actor_lr,
+                                          weight_decay=self.c.weight_decay)
 
 
     def update(self,replay_buffer) -> None:  
@@ -115,7 +113,7 @@ class Trainer:
         set_seed(self.c.seed,self.c.device)
         self.env = EnvManager(self.c).create_envs(self.c.train_env)
         
-        self.agent = Agent(self.c,self.env,self.env)
+        self.agent = Agent(self.c,self.env,self.env).to(self.c.device)
         self.logger = Logger()
         #self.replay_buffer = ReplayBuffer(10000)
         self.ep_reward_list = []
@@ -171,8 +169,13 @@ class Trainer:
                 observation, info = self.env.reset()
             obs = next_obs
         self.env.close()
+        observations = torch.stack(train_data[0]).cpu().numpy()
+        self.record_obs(observations)
         return train_data
-
+    def record_obs(self,obs):
+        print(obs.shape)
+        self.logger.write_video(filepath='test.mp4',frames=obs,fps=30)
+        
     def train(self):
         test = self.collect_experience(1000)
         print(test)
