@@ -10,7 +10,7 @@ class ReplayBuffer:
         self.act_buf = np.zeros((max_size, act_dim), dtype=np.float32)
         self.rew_buf = np.zeros(max_size, dtype=np.float32)
         self.done_buf = np.zeros(max_size, dtype=np.float32)
-        self.index = 0
+        self.index = 0 
 
     def add(self, obs, act, rew, done):
         self.obs_buf[self.ptr] = obs
