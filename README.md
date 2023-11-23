@@ -1,2 +1,2 @@
 # dualp
-Adaptive computational strategy paper
+Master thesis on adaptive computational strategy (System1/System2) for deep neural networks. 
