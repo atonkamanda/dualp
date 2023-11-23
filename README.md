@@ -1,6 +1,6 @@
 # dualp
 Master thesis on adaptive computational strategy (System1/System2) for deep neural networks. 
-
+![poster](figures/poster.png)
 The dual-process theory states that human cognition operates in two distinct modes: one
 for rapid, habitual and associative processing, commonly referred to as "system 1", and the
 second, with slower, deliberate and controlled processing, which we call "system 2". This
